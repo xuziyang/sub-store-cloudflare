@@ -3,6 +3,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 export { normalizeTarget, normalizeTargetAlias } from "./targets";
 import {
   MAX_DOH_RESPONSE_BYTES,
+  MAX_FLOW_RESPONSE_BYTES,
   MAX_REMOTE_SOURCE_RESPONSE_BYTES,
   MAX_REMOTE_SOURCE_TOTAL_BYTES,
   MAX_REMOTE_SOURCE_URLS,
@@ -233,6 +234,12 @@ async function loadSubscriptionRaw(
     throw new Error(`Remote source ${sub.name} exceeds the ${MAX_REMOTE_SOURCE_URLS} URL limit`);
   }
 
+  if (sub.meta?.urlMode === "priority") {
+    const selected = await loadPrioritySubscription(urls, sub, settings, requestUserAgent, runtime);
+    runtime?.responseMetadata?.set(sub.id, selected.metadata);
+    return decodeMaybeBase64(selected.content);
+  }
+
   const contents = await runWithConcurrency(
     urls.map((url) => async () => fetchSubscriptionUrl(url, sub, settings, requestUserAgent, runtime)),
     getRequestConcurrency(settings),
@@ -252,6 +259,181 @@ function splitSourceUrls(raw: string) {
     .split(/\r?\n/)
     .map((item) => item.trim())
     .filter((item) => /^https?:\/\//i.test(item));
+}
+
+const PRIORITY_RESERVE_BYTES = 1024 ** 3;
+const MAX_PRIORITY_RESERVE_BYTES = 1024 * PRIORITY_RESERVE_BYTES;
+
+type RemoteUsage = {
+  remaining: number;
+  total: number;
+  expiresAt?: number;
+};
+
+type PriorityCandidate = {
+  content: string;
+  metadata: SubscriptionResponseMetadata;
+  usage?: RemoteUsage;
+};
+
+async function loadPrioritySubscription(
+  urls: string[],
+  sub: SubscriptionSource,
+  settings: AppSettings | undefined,
+  requestUserAgent: string | undefined,
+  runtime: FetchRuntime | undefined,
+) {
+  const reserve = priorityReserveBytes(sub);
+  const now = Date.now();
+  const candidates: PriorityCandidate[] = [];
+  let lastError: unknown;
+  for (const url of urls) {
+    try {
+      const fetched = await fetchSubscriptionUrl(url, sub, settings, requestUserAgent, runtime);
+      const resolved = await resolvePriorityUsage(url, fetched.content, fetched.metadata, sub, settings, requestUserAgent, runtime);
+      const candidate: PriorityCandidate = {
+        content: fetched.content,
+        metadata: resolved.userinfo && !fetched.metadata.subscriptionUserinfo
+          ? { ...fetched.metadata, subscriptionUserinfo: safeHeaderValue(resolved.userinfo) }
+          : fetched.metadata,
+        usage: resolved.usage,
+      };
+      if (isPriorityEligible(resolved.usage, reserve, now)) return candidate;
+      candidates.push(candidate);
+    } catch (error) {
+      if (error instanceof SubrequestBudgetError) throw error;
+      lastError = error;
+    }
+  }
+  if (candidates.length === 0) {
+    throw lastError instanceof Error ? lastError : new Error(`Remote source ${sub.name} failed`);
+  }
+  return selectPriorityFallback(candidates, now);
+}
+
+function priorityReserveBytes(sub: SubscriptionSource) {
+  const bytes = sub.meta?.priorityReserveBytes;
+  if (bytes !== undefined && String(bytes).trim() !== "") {
+    return numberSetting(bytes, PRIORITY_RESERVE_BYTES, 0, MAX_PRIORITY_RESERVE_BYTES);
+  }
+  const gigabytes = sub.meta?.priorityReserveGb;
+  if (gigabytes !== undefined && String(gigabytes).trim() !== "") {
+    const value = Number(gigabytes);
+    if (Number.isFinite(value)) {
+      return numberSetting(Math.round(value * PRIORITY_RESERVE_BYTES), PRIORITY_RESERVE_BYTES, 0, MAX_PRIORITY_RESERVE_BYTES);
+    }
+  }
+  return PRIORITY_RESERVE_BYTES;
+}
+
+async function resolvePriorityUsage(
+  url: string,
+  content: string,
+  metadata: SubscriptionResponseMetadata,
+  sub: SubscriptionSource,
+  settings: AppSettings | undefined,
+  requestUserAgent: string | undefined,
+  runtime: FetchRuntime | undefined,
+) {
+  const inline = usageText(metadata.subscriptionUserinfo, content);
+  const inlineUsage = parseRemoteUsage(inline);
+  if (inlineUsage) return { usage: inlineUsage, userinfo: metadata.subscriptionUserinfo || inline };
+  const flowUrl = subscriptionFlowUrl(url);
+  if (!flowUrl) return {};
+  try {
+    const flowText = await fetchFlowText(flowUrl, sub, settings, requestUserAgent, runtime);
+    const usage = parseRemoteUsage(flowText);
+    return usage ? { usage, userinfo: flowText } : {};
+  } catch (error) {
+    if (error instanceof SubrequestBudgetError) throw error;
+    return {};
+  }
+}
+
+async function fetchFlowText(
+  url: string,
+  sub: SubscriptionSource,
+  settings: AppSettings | undefined,
+  requestUserAgent: string | undefined,
+  runtime: FetchRuntime | undefined,
+) {
+  if (!consumeSubrequest(runtime?.budget)) throw new SubrequestBudgetError(subrequestBudgetMessage(runtime?.budget));
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), getRequestTimeout(settings));
+  try {
+    const response = await fetch(url, {
+      headers: { "user-agent": getSourceUserAgent(sub, settings, requestUserAgent) },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`Remote source ${sub.name} flow failed: ${response.status}`);
+    return await readResponseText(response, MAX_FLOW_RESPONSE_BYTES, `Flow ${sub.name}`);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function usageText(header: string | undefined, body: string) {
+  const bodyUsage = /(?:^|[;\n\r ])upload=/.test(body) ? body : undefined;
+  const text = [header, bodyUsage].filter(Boolean).join("; ");
+  return text || undefined;
+}
+
+function parseRemoteUsage(raw: string | undefined): RemoteUsage | undefined {
+  if (!raw) return undefined;
+  const download = usageNumber(raw, "download");
+  const total = usageNumber(raw, "total");
+  if (download === undefined || total === undefined) return undefined;
+  const upload = usageNumber(raw, "upload") ?? 0;
+  const expire = usageNumber(raw, "expire");
+  return {
+    remaining: total - upload - download,
+    total,
+    expiresAt: expire && expire > 0 ? (expire > 1e12 ? expire : expire * 1000) : undefined,
+  };
+}
+
+function usageNumber(input: string, key: string) {
+  const match = input.match(new RegExp(`${key}=([-+]?)([0-9]*\\.?[0-9]+(?:[eE][-+]?[0-9]+)?)`));
+  return match ? Number(match[1] + match[2]) : undefined;
+}
+
+function isExpiredUsage(usage: RemoteUsage, now: number) {
+  return usage.expiresAt !== undefined && usage.expiresAt <= now;
+}
+
+function isPriorityEligible(usage: RemoteUsage | undefined, reserve: number, now: number) {
+  if (usage && isExpiredUsage(usage, now)) return false;
+  if (!usage || !(usage.total > 0)) return true;
+  return usage.remaining >= reserve;
+}
+
+function selectPriorityFallback(candidates: PriorityCandidate[], now: number) {
+  const measured = candidates.filter((item): item is PriorityCandidate & { usage: RemoteUsage } => Boolean(item.usage && item.usage.total > 0));
+  const active = measured.filter((item) => !isExpiredUsage(item.usage, now));
+  const pool = active.length > 0 ? active : measured;
+  if (pool.length === 0) return candidates[0];
+  return pool.reduce((best, item) => item.usage.remaining > best.usage.remaining ? item : best);
+}
+
+function subscriptionFlowUrl(rawUrl: string) {
+  const hash = rawUrl.split("#").slice(1).join("#");
+  if (!hash) return undefined;
+  let args: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(decodeURIComponent(hash)) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) args = parsed as Record<string, unknown>;
+  } catch {
+    args = Object.fromEntries(
+      hash.split("&").filter(Boolean).map((pair) => {
+        const [key, value] = pair.split("=");
+        return [key, value === undefined || value === "" ? true : decodeURIComponent(value)];
+      }),
+    );
+  }
+  if (args.noFlow) return undefined;
+  const flowUrl = typeof args.flowUrl === "string" ? args.flowUrl.trim() : "";
+  if (!/^https?:\/\//i.test(flowUrl)) return undefined;
+  return flowUrl === rawUrl.split("#")[0] ? undefined : flowUrl;
 }
 
 async function fetchSubscriptionUrl(

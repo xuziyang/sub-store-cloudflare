@@ -74,7 +74,7 @@ Cloudflare Worker
 
 ## 输入与核心能力
 
-远程订阅最多 8 个 URL，可以按行填写并合并；单个响应上限 2 MiB，合计上限 12 MiB。本地订阅支持单行 URI、Mihomo YAML、JSON/JSON5 代理数组、常见 Surge/Loon/Quantumult X 单行节点和完整 Base64 内容。远程响应可以经过 Workers Cache API 短期缓存，并只透传允许的订阅元数据。管理 API 请求体上限是 4 MiB，流量信息、节点信息和 DoH 响应分别限制在 64 KiB。
+远程订阅最多 8 个 URL。默认按行拉取并合并；订阅源也可以选择「按优先级切换」。切换时按从上到下的顺序，使用第一个未过期、且剩余流量不低于设定值的链接。剩余流量读取订阅响应的 `subscription-userinfo`，也可以由链接上的 `flowUrl` 提供；默认剩余低于 1 GiB 时切换，这个值按订阅源配置。查不到流量不会当成用完。全部都低于提前量时，使用剩余最多的一个。单个响应上限 2 MiB，合并模式下合计上限 12 MiB。本地订阅支持单行 URI、Mihomo YAML、JSON/JSON5 代理数组、常见 Surge/Loon/Quantumult X 单行节点和完整 Base64 内容。远程响应可以经过 Workers Cache API 短期缓存，并只透传允许的订阅元数据。管理 API 请求体上限是 4 MiB，流量信息、节点信息和 DoH 响应分别限制在 64 KiB。
 
 这版保留的核心能力是：
 

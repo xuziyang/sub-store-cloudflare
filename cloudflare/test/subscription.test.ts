@@ -188,6 +188,252 @@ describe("subscription parsing and limits", () => {
     })).rejects.toThrow("At most 2 script actions");
   });
 
+  it("switches to the next remote URL when remaining traffic is below the configured reserve", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/plan-a")) {
+        return new Response("trojan://password@a.example:443#Plan%20A", {
+          headers: { "subscription-userinfo": "upload=0; download=900; total=1000" },
+        });
+      }
+      return new Response("trojan://password@b.example:443#Plan%20B", {
+        headers: { "subscription-userinfo": "upload=0; download=100; total=1000" },
+      });
+    });
+
+    const output = await buildSubscription({
+      source: {
+        id: "priority",
+        name: "Priority",
+        type: "remote",
+        url: "https://example.com/plan-a\nhttps://example.com/plan-b",
+        content: "",
+        meta: { urlMode: "priority", priorityReserveBytes: 200 },
+      },
+      sources: [],
+      requestUrl: new URL("https://example.com/download/source/priority/json"),
+      target: "json",
+      settings: { remoteCacheTtl: 0 },
+    });
+
+    expect(output).toContain("Plan B");
+    expect(output).not.toContain("Plan A");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the first remote URL when its remaining traffic is above the reserve", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(
+      "trojan://password@a.example:443#Plan%20A",
+      { headers: { "subscription-userinfo": "upload=0; download=100; total=1000" } },
+    ));
+    const output = await buildSubscription({
+      source: {
+        id: "priority",
+        name: "Priority",
+        type: "remote",
+        url: "https://example.com/plan-a\nhttps://example.com/plan-b",
+        content: "",
+        meta: { urlMode: "priority", priorityReserveBytes: 200 },
+      },
+      sources: [],
+      requestUrl: new URL("https://example.com/download/source/priority/json"),
+      target: "json",
+      settings: { remoteCacheTtl: 0 },
+    });
+    expect(output).toContain("Plan A");
+    expect(output).not.toContain("Plan B");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the remote URL with the most remaining traffic when every plan is below the reserve", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      const low = url.includes("/plan-a");
+      return new Response(
+        low ? "trojan://password@a.example:443#Plan%20A" : "trojan://password@b.example:443#Plan%20B",
+        { headers: { "subscription-userinfo": low ? "upload=0; download=990; total=1000" : "upload=0; download=900; total=1000" } },
+      );
+    });
+    const output = await buildSubscription({
+      source: {
+        id: "priority",
+        name: "Priority",
+        type: "remote",
+        url: "https://example.com/plan-a\nhttps://example.com/plan-b",
+        content: "",
+        meta: { urlMode: "priority", priorityReserveBytes: 200 },
+      },
+      sources: [],
+      requestUrl: new URL("https://example.com/download/source/priority/json"),
+      target: "json",
+      settings: { remoteCacheTtl: 0 },
+    });
+    expect(output).toContain("Plan B");
+    expect(output).not.toContain("Plan A");
+  });
+
+  it("does not treat missing usage as exhausted and keeps the earlier URL", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(
+      "trojan://password@a.example:443#Plan%20A",
+    ));
+    const output = await buildSubscription({
+      source: {
+        id: "priority",
+        name: "Priority",
+        type: "remote",
+        url: "https://example.com/plan-a\nhttps://example.com/plan-b",
+        content: "",
+        meta: { urlMode: "priority", priorityReserveBytes: 1 },
+      },
+      sources: [],
+      requestUrl: new URL("https://example.com/download/source/priority/json"),
+      target: "json",
+      settings: { remoteCacheTtl: 0 },
+    });
+    expect(output).toContain("Plan A");
+    expect(output).not.toContain("Plan B");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips an expired plan before considering its remaining traffic", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/plan-a")) {
+        return new Response("trojan://password@a.example:443#Plan%20A", {
+          headers: { "subscription-userinfo": "upload=0; download=0; total=1000; expire=1" },
+        });
+      }
+      return new Response("trojan://password@b.example:443#Plan%20B", {
+        headers: { "subscription-userinfo": "upload=0; download=0; total=1000; expire=4115721600" },
+      });
+    });
+    const output = await buildSubscription({
+      source: {
+        id: "priority",
+        name: "Priority",
+        type: "remote",
+        url: "https://example.com/plan-a\nhttps://example.com/plan-b",
+        content: "",
+        meta: { urlMode: "priority", priorityReserveBytes: 1 },
+      },
+      sources: [],
+      requestUrl: new URL("https://example.com/download/source/priority/json"),
+      target: "json",
+      settings: { remoteCacheTtl: 0 },
+    });
+    expect(output).toContain("Plan B");
+    expect(output).not.toContain("Plan A");
+  });
+
+  it("defaults the priority reserve to 1 GiB", async () => {
+    const gibibyte = 1024 ** 3;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/plan-a")) {
+        return new Response("trojan://password@a.example:443#Plan%20A", {
+          headers: { "subscription-userinfo": `upload=0; download=1; total=${gibibyte}` },
+        });
+      }
+      return new Response("trojan://password@b.example:443#Plan%20B", {
+        headers: { "subscription-userinfo": `upload=0; download=0; total=${gibibyte * 2}` },
+      });
+    });
+    const output = await buildSubscription({
+      source: {
+        id: "priority",
+        name: "Priority",
+        type: "remote",
+        url: "https://example.com/plan-a\nhttps://example.com/plan-b",
+        content: "",
+        meta: { urlMode: "priority" },
+      },
+      sources: [],
+      requestUrl: new URL("https://example.com/download/source/priority/json"),
+      target: "json",
+      settings: { remoteCacheTtl: 0 },
+    });
+    expect(output).toContain("Plan B");
+    expect(output).not.toContain("Plan A");
+  });
+
+  it("skips a failed priority URL and uses the next plan", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/plan-a")) return new Response("nope", { status: 500 });
+      return new Response("trojan://password@b.example:443#Plan%20B", {
+        headers: { "subscription-userinfo": "upload=0; download=0; total=1000" },
+      });
+    });
+    const output = await buildSubscription({
+      source: {
+        id: "priority",
+        name: "Priority",
+        type: "remote",
+        url: "https://example.com/plan-a\nhttps://example.com/plan-b",
+        content: "",
+        meta: { urlMode: "priority", priorityReserveBytes: 1 },
+      },
+      sources: [],
+      requestUrl: new URL("https://example.com/download/source/priority/json"),
+      target: "json",
+      settings: { remoteCacheTtl: 0 },
+    });
+    expect(output).toContain("Plan B");
+    expect(output).not.toContain("Plan A");
+  });
+
+  it("reads priority usage from flowUrl when the subscription response has none", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/flow-a")) return new Response("upload=0; download=900; total=1000");
+      if (url.includes("/plan-a")) return new Response("trojan://password@a.example:443#Plan%20A");
+      return new Response("trojan://password@b.example:443#Plan%20B", {
+        headers: { "subscription-userinfo": "upload=0; download=0; total=1000" },
+      });
+    });
+    const output = await buildSubscription({
+      source: {
+        id: "priority",
+        name: "Priority",
+        type: "remote",
+        url: "https://example.com/plan-a#flowUrl=https%3A%2F%2Fexample.com%2Fflow-a\nhttps://example.com/plan-b",
+        content: "",
+        meta: { urlMode: "priority", priorityReserveBytes: 200 },
+      },
+      sources: [],
+      requestUrl: new URL("https://example.com/download/source/priority/json"),
+      target: "json",
+      settings: { remoteCacheTtl: 0 },
+    });
+    expect(output).toContain("Plan B");
+    expect(output).not.toContain("Plan A");
+  });
+
+  it("still merges multiple remote URLs unless priority mode is enabled", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      const body = url.includes("/plan-a")
+        ? "trojan://password@a.example:443#Plan%20A"
+        : "trojan://password@b.example:443#Plan%20B";
+      return new Response(body);
+    });
+    const output = await buildSubscription({
+      source: {
+        id: "merge",
+        name: "Merge",
+        type: "remote",
+        url: "https://example.com/plan-a\nhttps://example.com/plan-b",
+        content: "",
+      },
+      sources: [],
+      requestUrl: new URL("https://example.com/download/source/merge/json"),
+      target: "json",
+      settings: { remoteCacheTtl: 0 },
+    });
+    expect(output).toContain("Plan A");
+    expect(output).toContain("Plan B");
+  });
+
   it("rejects sources with too many remote URLs before fetching", async () => {
     const urls = Array.from({ length: MAX_REMOTE_SOURCE_URLS + 1 }, (_, index) => `https://example.com/${index}`).join("\n");
     await expect(buildSubscription({

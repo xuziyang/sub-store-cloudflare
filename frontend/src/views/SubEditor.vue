@@ -205,7 +205,38 @@
             />
           </nut-form-item>
           <nut-form-item
-            v-else-if="form.source === 'local'"
+            v-if="form.source === 'remote'"
+            :label="$t(`editorPage.subConfig.basic.urlMode.label`)"
+            prop="urlMode"
+          >
+            <div class="radio-wrapper">
+              <nut-radiogroup direction="horizontal" v-model="form.urlMode">
+                <nut-radio shape="button" label="merge">
+                  {{ $t(`editorPage.subConfig.basic.urlMode.merge`) }}
+                </nut-radio>
+                <nut-radio shape="button" label="priority">
+                  {{ $t(`editorPage.subConfig.basic.urlMode.priority`) }}
+                </nut-radio>
+              </nut-radiogroup>
+            </div>
+          </nut-form-item>
+          <nut-form-item
+            v-if="form.source === 'remote' && form.urlMode === 'priority'"
+            :label="$t(`editorPage.subConfig.basic.priorityReserve.label`)"
+            prop="priorityReserveGb"
+            :rules="[{ validator: reserveValidator, message: $t(`editorPage.subConfig.basic.priorityReserve.invalid`) }]"
+          >
+            <nut-input
+              :border="false"
+              class="nut-input-text"
+              v-model="form.priorityReserveGb"
+              :placeholder="$t(`editorPage.subConfig.basic.priorityReserve.placeholder`)"
+              type="text"
+              input-align="right"
+            />
+          </nut-form-item>
+          <nut-form-item
+            v-if="form.source === 'local'"
             :label="undefined"
             prop="content"
           >
@@ -882,6 +913,8 @@ const form = reactive<any>({
   passThroughUA: false,
   icon: "",
   isIconColor: true,
+  urlMode: "merge",
+  priorityReserveGb: "1",
   process: [],
 });
 provide("form", form);
@@ -916,6 +949,8 @@ watchEffect(() => {
         form.url = "";
         form.content = "";
         form.ua = "";
+        form.urlMode = "merge";
+        form.priorityReserveGb = "1";
         cmStore.setEditCode('SubEditer', "");
         break;
     }
@@ -960,6 +995,8 @@ watchEffect(() => {
     case "subs":
       form.source = sourceData.source;
       form.url = sourceData.url;
+      form.urlMode = sourceData.urlMode === "priority" ? "priority" : "merge";
+      form.priorityReserveGb = formatReserveGb(sourceData.priorityReserveGb, sourceData.priorityReserveBytes);
       form.content = sourceData.content;
       cmStore.setEditCode('SubEditer', sourceData.content);
       form.ua = sourceData.ua;
@@ -1182,6 +1219,7 @@ const fetchCompareData = async () => {
     delete data.firstSubFlow;
     delete data.proxy;
     delete data.mergeSources;
+    applyPrioritySettings(data);
     data.tag = [
       ...new Set(
         (data.tag || "")
@@ -1319,6 +1357,7 @@ const submit = () => {
     }
     delete data.proxy;
     delete data.mergeSources;
+    applyPrioritySettings(data);
     data.tag = [
       ...new Set(
         (data.tag || "")
@@ -1384,6 +1423,39 @@ const nameValidator = (val: string): Promise<boolean> => {
 };
 
 // url 格式验证器
+const GIBIBYTE = 1024 ** 3;
+
+const formatReserveGb = (gigabytes: unknown, bytes: unknown) => {
+  const direct = Number(gigabytes);
+  if (Number.isFinite(direct) && direct >= 0) return String(direct);
+  const stored = Number(bytes);
+  if (!Number.isFinite(stored) || stored < 0) return "1";
+  return String(Number((stored / GIBIBYTE).toFixed(3)));
+};
+
+const applyPrioritySettings = (data: any) => {
+  const raw = String(data.priorityReserveGb ?? "").trim();
+  const gigabytes = raw === "" ? 1 : Number(raw);
+  const bytes = Number.isFinite(gigabytes) && gigabytes >= 0
+    ? Math.min(Math.round(gigabytes * GIBIBYTE), 1024 * GIBIBYTE)
+    : GIBIBYTE;
+  delete data.priorityReserveGb;
+  if (data.source !== "remote" && data.type !== "remote") {
+    delete data.urlMode;
+    delete data.priorityReserveBytes;
+    return;
+  }
+  data.urlMode = data.urlMode === "priority" ? "priority" : "merge";
+  data.priorityReserveBytes = bytes;
+};
+
+const reserveValidator = (val: string): Promise<boolean> => {
+  const raw = String(val ?? "").trim();
+  if (!raw) return Promise.resolve(true);
+  const gigabytes = Number(raw);
+  return Promise.resolve(Number.isFinite(gigabytes) && gigabytes >= 0 && gigabytes <= 1024);
+};
+
 const urlValidator = (val: string): Promise<boolean> => {
   return new Promise((resolve) => {
     if (/\n/.test(val)) {

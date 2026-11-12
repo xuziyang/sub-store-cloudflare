@@ -110,7 +110,14 @@
           "type": "array",
           "items": { "$ref": "#/$defs/filter" }
         },
-        "meta": { "type": "object" }
+        "meta": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "urlMode": { "enum": ["merge", "priority"] },
+            "priorityReserveBytes": { "type": "integer", "minimum": 0, "maximum": 1099511627776 }
+          }
+        }
       },
       "required": ["id", "name", "type"],
       "allOf": [

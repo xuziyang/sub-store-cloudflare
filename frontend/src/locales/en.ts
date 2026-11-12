@@ -325,6 +325,16 @@ export default {
           localFirst: "Local Fist",
           remoteFirst: "Remote First"
         },
+        urlMode: {
+          label: "Multiple URLs",
+          merge: "Merge nodes",
+          priority: "Switch by priority"
+        },
+        priorityReserve: {
+          label: "Switch below (GB)",
+          placeholder: "1",
+          invalid: "Enter remaining traffic from 0 to 1024"
+        },
         url: {
           label: "URL",
           placeholder: "One http(s) remote subscription URL per line",
@@ -334,7 +344,7 @@ export default {
             fullScreenEditCancel: "Exit Full Screen Editing",
             label: "Usage",
             title: "Subscription URL(s)",
-            content: "Put one full http(s) remote subscription URL on each line. Multiple lines are fetched and merged.\n\nUsage info parameters:\n\nflowUrl: custom URL for subscription usage info; reads the response body or subscription-userinfo/profile-web-page-url/plan-name response headers\nflowUserAgent: User-Agent for usage info requests\nflowHeaders: request headers for usage info requests, as a URL-encoded one-line JSON string\nnoFlow: skip usage info\nhideExpire: hide expiration time\nshowRemaining: show remaining traffic instead of used traffic\n\nThe remote subscription User-Agent can be set on this page. Timeout and concurrency are configured on the Settings page.\n\nExample: https://example.com/sub?token=1#flowUrl=https%3A%2F%2Fexample.com%2Fuserinfo&showRemaining"
+            content: "Put one full http(s) remote subscription URL on each line. Lines are fetched and merged by default. With Switch by priority, URLs are tried from top to bottom and the first unexpired plan whose remaining traffic is at least the configured amount is used. If every plan is below that amount, the one with the most remaining traffic is used. The default switch point is 1 GB. Missing usage data is not treated as exhausted.\n\nUsage info parameters:\n\nflowUrl: custom URL for subscription usage info; reads the response body or subscription-userinfo/profile-web-page-url/plan-name response headers\nflowUserAgent: User-Agent for usage info requests\nflowHeaders: request headers for usage info requests, as a URL-encoded one-line JSON string\nnoFlow: skip usage info\nhideExpire: hide expiration time\nshowRemaining: show remaining traffic instead of used traffic\n\nThe remote subscription User-Agent can be set on this page. Timeout and concurrency are configured on the Settings page.\n\nExample: https://example.com/sub?token=1#flowUrl=https%3A%2F%2Fexample.com%2Fuserinfo&showRemaining"
           },
           isEmpty: "URL cannot be empty",
           isIllegal: "Invalid URL"
